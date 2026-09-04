@@ -33,22 +33,7 @@ jobs:
           echo "Trying a lightweight download first..."
           curl -fL --retry 3 --retry-delay 2 "$SHARE_URL" -o share.html || true
 
-          python3 - <<'PY' || true
-          from pathlib import Path
-          import re, html
-          p = Path('share.html')
-          if not p.exists():
-              raise SystemExit(0)
-          s = html.unescape(p.read_text(errors='ignore'))
-          urls = re.findall(r'https?://[^\"\'<>\\s]+', s)
-          hrefs = re.findall(r'href=[\"\']([^\"\']+)', s, flags=re.I)
-          for u in urls + hrefs:
-              if 'tar.gz' in u or 'download' in u.lower():
-                  print(u)
-          PY
-
-          # The public share page may render its download link in JavaScript.
-          # Use Playwright as a robust fallback and capture the actual file download.
+          # The public share page renders its download action in JavaScript.
           cat > downloader.mjs <<'JS'
           import { chromium } from 'playwright';
           import fs from 'node:fs';
@@ -83,7 +68,6 @@ jobs:
           console.log((await page.locator('body').innerText()).slice(0, 12000));
 
           const selectors = [
-            'text=uidomhome-project-import.tar.gz',
             'text=uidomhome-project.tar.gz',
             'a[download]',
             'button:has-text("ダウンロード")',
@@ -115,7 +99,6 @@ jobs:
             }
           }
 
-          // Last resort: inspect every visible link/button for file/download wording.
           if (!saved) {
             const all = page.locator('a,button');
             const count = Math.min(await all.count(), 100);
@@ -123,7 +106,6 @@ jobs:
               const el = all.nth(i);
               const text = ((await el.innerText().catch(() => '')) + ' ' + (await el.getAttribute('href').catch(() => '') || '')).trim();
               if (!/uidomhome|tar\.gz|download|ダウンロード/i.test(text)) continue;
-              console.log('Trying candidate:', text.slice(0, 500));
               try {
                 const downloadPromise = page.waitForEvent('download', { timeout: 12000 }).catch(() => null);
                 await el.click({ timeout: 10000 });
@@ -153,9 +135,10 @@ jobs:
 
           test -s project.tar.gz
           file project.tar.gz
-          tar -tzf project.tar.gz | head -100
-          tar -tzf project.tar.gz | grep -q '^\./package.json$'
-          tar -tzf project.tar.gz | grep -q '^\./app/page.tsx$'
+          tar -tzf project.tar.gz > archive-list.txt
+          head -100 archive-list.txt
+          grep -q '^\./package.json$' archive-list.txt
+          grep -q '^\./app/page.tsx$' archive-list.txt
 
       - name: Replace starter with full UIDOMHOME project
         shell: bash
