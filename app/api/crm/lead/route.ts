@@ -1,5 +1,3 @@
-import { env } from "cloudflare:workers";
-
 export const dynamic = "force-dynamic";
 
 type LeadKind = "apartment" | "repair";
@@ -40,8 +38,7 @@ function clean(value: unknown, maxLength = 240) {
 }
 
 function webhookBase() {
-  const runtimeEnv = env as unknown as Record<string, string | undefined>;
-  const raw = runtimeEnv.BITRIX24_WEBHOOK_URL?.trim();
+  const raw = process.env.BITRIX24_WEBHOOK_URL?.trim();
   if (!raw) return null;
 
   try {
