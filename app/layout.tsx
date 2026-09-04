@@ -1,0 +1,3 @@
+import type {Metadata} from "next";import "./globals.css";
+export const metadata:Metadata={metadataBase:new URL("https://stroy-company.timka240306.chatgpt.site"),title:{default:"UIDOMHOME",template:"%s — UIDOMHOME"},description:"Жилые комплексы UIDOMHOME, квартиры в наличии и реализованные проекты в Астане.",icons:{icon:"/uidomhome-mark.webp",apple:"/uidomhome-mark.webp"},openGraph:{title:"UIDOMHOME",description:"Недвижимость в Астане",images:["/og.webp"]},twitter:{card:"summary_large_image",title:"UIDOMHOME",description:"Недвижимость в Астане",images:["/og.webp"]}};
+export default function RootLayout({children}:{children:React.ReactNode}){return <html lang="ru"><body>{children}</body></html>}
