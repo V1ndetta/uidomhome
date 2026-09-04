@@ -1,0 +1,193 @@
+name: Import UIDOMHOME project
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/import-uidomhome.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  import-project:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download UIDOMHOME archive from firestorage.ai
+        shell: bash
+        env:
+          SHARE_URL: https://firestorage.ai/ja/f/ceRctPaw9noD
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/uidomhome-import
+          cd /tmp/uidomhome-import
+
+          echo "Trying a lightweight download first..."
+          curl -fL --retry 3 --retry-delay 2 "$SHARE_URL" -o share.html || true
+
+          python3 - <<'PY' || true
+          from pathlib import Path
+          import re, html
+          p = Path('share.html')
+          if not p.exists():
+              raise SystemExit(0)
+          s = html.unescape(p.read_text(errors='ignore'))
+          urls = re.findall(r'https?://[^\"\'<>\\s]+', s)
+          hrefs = re.findall(r'href=[\"\']([^\"\']+)', s, flags=re.I)
+          for u in urls + hrefs:
+              if 'tar.gz' in u or 'download' in u.lower():
+                  print(u)
+          PY
+
+          # The public share page may render its download link in JavaScript.
+          # Use Playwright as a robust fallback and capture the actual file download.
+          cat > downloader.mjs <<'JS'
+          import { chromium } from 'playwright';
+          import fs from 'node:fs';
+
+          const shareUrl = process.env.SHARE_URL;
+          const out = '/tmp/uidomhome-import/project.tar.gz';
+          const browser = await chromium.launch({ headless: true });
+          const context = await browser.newContext({ acceptDownloads: true });
+          const page = await context.newPage();
+          let saved = false;
+
+          page.on('response', async (response) => {
+            if (saved) return;
+            try {
+              const h = response.headers();
+              const ct = (h['content-type'] || '').toLowerCase();
+              const cd = (h['content-disposition'] || '').toLowerCase();
+              const url = response.url();
+              if (ct.includes('gzip') || ct.includes('x-gzip') || cd.includes('attachment') || url.includes('.tar.gz')) {
+                const body = await response.body();
+                if (body.length > 1000 && body[0] === 0x1f && body[1] === 0x8b) {
+                  fs.writeFileSync(out, body);
+                  saved = true;
+                  console.log('Saved archive from response:', url, body.length);
+                }
+              }
+            } catch {}
+          });
+
+          await page.goto(shareUrl, { waitUntil: 'networkidle', timeout: 120000 });
+          console.log('Page title:', await page.title());
+          console.log((await page.locator('body').innerText()).slice(0, 12000));
+
+          const selectors = [
+            'text=uidomhome-project-import.tar.gz',
+            'text=uidomhome-project.tar.gz',
+            'a[download]',
+            'button:has-text("ダウンロード")',
+            'a:has-text("ダウンロード")',
+            'button:has-text("Download")',
+            'a:has-text("Download")'
+          ];
+
+          for (const selector of selectors) {
+            if (saved) break;
+            const loc = page.locator(selector);
+            const count = await loc.count().catch(() => 0);
+            for (let i = 0; i < count && !saved; i++) {
+              const el = loc.nth(i);
+              try {
+                const downloadPromise = page.waitForEvent('download', { timeout: 12000 }).catch(() => null);
+                await el.click({ timeout: 10000 });
+                const download = await downloadPromise;
+                if (download) {
+                  await download.saveAs(out);
+                  saved = true;
+                  console.log('Saved browser download:', await download.suggestedFilename());
+                  break;
+                }
+                await page.waitForTimeout(2500);
+              } catch (e) {
+                console.log('Candidate click failed:', selector, String(e).slice(0, 300));
+              }
+            }
+          }
+
+          // Last resort: inspect every visible link/button for file/download wording.
+          if (!saved) {
+            const all = page.locator('a,button');
+            const count = Math.min(await all.count(), 100);
+            for (let i = 0; i < count && !saved; i++) {
+              const el = all.nth(i);
+              const text = ((await el.innerText().catch(() => '')) + ' ' + (await el.getAttribute('href').catch(() => '') || '')).trim();
+              if (!/uidomhome|tar\.gz|download|ダウンロード/i.test(text)) continue;
+              console.log('Trying candidate:', text.slice(0, 500));
+              try {
+                const downloadPromise = page.waitForEvent('download', { timeout: 12000 }).catch(() => null);
+                await el.click({ timeout: 10000 });
+                const download = await downloadPromise;
+                if (download) {
+                  await download.saveAs(out);
+                  saved = true;
+                  console.log('Saved fallback browser download:', await download.suggestedFilename());
+                  break;
+                }
+                await page.waitForTimeout(2500);
+              } catch {}
+            }
+          }
+
+          await browser.close();
+          if (!saved || !fs.existsSync(out)) {
+            console.error('Could not obtain archive from public share page.');
+            process.exit(2);
+          }
+          JS
+
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.55.0
+          npx playwright install chromium
+          node downloader.mjs
+
+          test -s project.tar.gz
+          file project.tar.gz
+          tar -tzf project.tar.gz | head -100
+          tar -tzf project.tar.gz | grep -q '^\./package.json$'
+          tar -tzf project.tar.gz | grep -q '^\./app/page.tsx$'
+
+      - name: Replace starter with full UIDOMHOME project
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/uidomhome-project
+          tar -xzf /tmp/uidomhome-import/project.tar.gz -C /tmp/uidomhome-project
+
+          # Keep git metadata and this one-time workflow, replace everything else.
+          find . -mindepth 1 -maxdepth 1 \
+            ! -name '.git' \
+            ! -name '.github' \
+            -exec rm -rf {} +
+          cp -a /tmp/uidomhome-project/. .
+
+          test -f package.json
+          test -f app/page.tsx
+          test -f app/globals.css
+          test -f public/uidomhome-logo.webp
+          echo "Imported files:"
+          find . -type f ! -path './.git/*' | sort
+
+      - name: Commit imported project
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "Import full UIDOMHOME website from 2026-09-02 archive"
+          git push origin HEAD:main
