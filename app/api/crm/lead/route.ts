@@ -63,10 +63,7 @@ function n8nWebhookUrl() {
   }
 }
 
-async function notifyN8n(payload: LeadPayload) {
-  const url = n8nWebhookUrl();
-  if (!url) return;
-
+async function notifyN8n(url: string, payload: LeadPayload) {
   const response = await fetch(url, {
     method: "POST",
     headers: {
@@ -192,15 +189,61 @@ function commentLines(payload: Required<Pick<LeadPayload, "kind">> & LeadPayload
     .join("\n");
 }
 
-export async function POST(request: Request) {
-  const base = webhookBase();
-  if (!base) {
-    return Response.json(
-      { ok: false, message: "CRM ещё не подключена" },
-      { status: 503 },
-    );
-  }
+async function createBitrixDeal(
+  base: string,
+  payload: Required<Pick<LeadPayload, "kind" | "name" | "phone">> & LeadPayload,
+) {
+  const { kind, name, phone } = payload;
+  const [contact, userFields, category] = await Promise.all([
+    contactId(base, name, phone),
+    callBitrix<BitrixUserField[]>(base, "crm.deal.userfield.list", {
+      order: { SORT: "ASC" },
+      filter: {},
+    }),
+    categoryId(base, kind === "repair" ? "Ремонт" : "Продажа квартир"),
+  ]);
 
+  const dealFields: Record<string, unknown> = {
+    TITLE:
+      kind === "repair"
+        ? `Заявка с сайта — ремонт — ${name}`
+        : `Заявка с сайта — ${payload.complex || "квартира"} — ${name}`,
+    CONTACT_IDS: [contact],
+    SOURCE_ID: "WEB",
+    SOURCE_DESCRIPTION: "Форма на сайте UIDOMHOME",
+    COMMENTS: commentLines(payload),
+    OPENED: "Y",
+    UTM_SOURCE: payload.utmSource,
+    UTM_MEDIUM: payload.utmMedium,
+    UTM_CAMPAIGN: payload.utmCampaign,
+    UTM_CONTENT: payload.utmContent,
+    UTM_TERM: payload.utmTerm,
+  };
+
+  if (category !== undefined) dealFields.CATEGORY_ID = category;
+
+  if (kind === "apartment") {
+    setCustomField(dealFields, userFields, "Жилой комплекс", payload.complex || "");
+    setCustomField(dealFields, userFields, "Количество комнат", payload.rooms || "");
+    setCustomField(dealFields, userFields, "Способ оплаты", payload.payment || "");
+  } else {
+    setCustomField(dealFields, userFields, "Тип объекта", payload.objectType || "");
+    setCustomField(dealFields, userFields, "Вид ремонта", payload.repairType || "");
+    setCustomField(dealFields, userFields, "Адрес объекта", payload.address || "");
+    setCustomField(dealFields, userFields, "Бюджет клиента, ₸", payload.budget || "");
+    setCustomField(dealFields, userFields, "Желаемая дата начала", payload.desiredDate || "");
+  }
+  setCustomField(dealFields, userFields, "Страница заявки", payload.page || "");
+
+  const dealId = await callBitrix<string | number>(base, "crm.deal.add", {
+    fields: dealFields,
+    params: { REGISTER_SONET_EVENT: "N" },
+  });
+
+  return Number(dealId);
+}
+
+export async function POST(request: Request) {
   const origin = request.headers.get("origin");
   if (origin && new URL(origin).host !== new URL(request.url).host) {
     return Response.json({ ok: false }, { status: 403 });
@@ -230,7 +273,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const payload: Required<Pick<LeadPayload, "kind">> & LeadPayload = {
+  const payload: Required<Pick<LeadPayload, "kind" | "name" | "phone">> & LeadPayload = {
     kind,
     name,
     phone,
@@ -253,62 +296,39 @@ export async function POST(request: Request) {
     utmTerm: clean(raw.utmTerm, 100),
   };
 
-  try {
-    await notifyN8n(payload);
-  } catch (error) {
-    console.error("n8n lead notification failed", error);
+  const base = webhookBase();
+  const n8nUrl = n8nWebhookUrl();
+
+  if (!base && !n8nUrl) {
+    return Response.json(
+      { ok: false, message: "Приём заявок ещё не подключён" },
+      { status: 503 },
+    );
   }
 
-  try {
-    const [contact, userFields, category] = await Promise.all([
-      contactId(base, name, phone),
-      callBitrix<BitrixUserField[]>(base, "crm.deal.userfield.list", {
-        order: { SORT: "ASC" },
-        filter: {},
-      }),
-      categoryId(base, kind === "repair" ? "Ремонт" : "Продажа квартир"),
-    ]);
+  let n8nDelivered = false;
+  let bitrixDelivered = false;
+  let dealId: number | undefined;
 
-    const dealFields: Record<string, unknown> = {
-      TITLE:
-        kind === "repair"
-          ? `Заявка с сайта — ремонт — ${name}`
-          : `Заявка с сайта — ${payload.complex || "квартира"} — ${name}`,
-      CONTACT_IDS: [contact],
-      SOURCE_ID: "WEB",
-      SOURCE_DESCRIPTION: "Форма на сайте UIDOMHOME",
-      COMMENTS: commentLines(payload),
-      OPENED: "Y",
-      UTM_SOURCE: payload.utmSource,
-      UTM_MEDIUM: payload.utmMedium,
-      UTM_CAMPAIGN: payload.utmCampaign,
-      UTM_CONTENT: payload.utmContent,
-      UTM_TERM: payload.utmTerm,
-    };
-
-    if (category !== undefined) dealFields.CATEGORY_ID = category;
-
-    if (kind === "apartment") {
-      setCustomField(dealFields, userFields, "Жилой комплекс", payload.complex || "");
-      setCustomField(dealFields, userFields, "Количество комнат", payload.rooms || "");
-      setCustomField(dealFields, userFields, "Способ оплаты", payload.payment || "");
-    } else {
-      setCustomField(dealFields, userFields, "Тип объекта", payload.objectType || "");
-      setCustomField(dealFields, userFields, "Вид ремонта", payload.repairType || "");
-      setCustomField(dealFields, userFields, "Адрес объекта", payload.address || "");
-      setCustomField(dealFields, userFields, "Бюджет клиента, ₸", payload.budget || "");
-      setCustomField(dealFields, userFields, "Желаемая дата начала", payload.desiredDate || "");
+  if (n8nUrl) {
+    try {
+      await notifyN8n(n8nUrl, payload);
+      n8nDelivered = true;
+    } catch (error) {
+      console.error("n8n lead notification failed", error);
     }
-    setCustomField(dealFields, userFields, "Страница заявки", payload.page || "");
+  }
 
-    const dealId = await callBitrix<string | number>(base, "crm.deal.add", {
-      fields: dealFields,
-      params: { REGISTER_SONET_EVENT: "N" },
-    });
+  if (base) {
+    try {
+      dealId = await createBitrixDeal(base, payload);
+      bitrixDelivered = true;
+    } catch (error) {
+      console.error("Bitrix24 lead submission failed", error);
+    }
+  }
 
-    return Response.json({ ok: true, dealId: Number(dealId) });
-  } catch (error) {
-    console.error("Bitrix24 lead submission failed", error);
+  if (!n8nDelivered && !bitrixDelivered) {
     return Response.json(
       {
         ok: false,
@@ -317,4 +337,13 @@ export async function POST(request: Request) {
       { status: 502 },
     );
   }
+
+  return Response.json({
+    ok: true,
+    dealId,
+    deliveredTo: {
+      n8n: n8nDelivered,
+      bitrix: bitrixDelivered,
+    },
+  });
 }
