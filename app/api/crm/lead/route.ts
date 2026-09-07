@@ -50,6 +50,38 @@ function webhookBase() {
   }
 }
 
+function n8nWebhookUrl() {
+  const raw = process.env.N8N_LEADS_WEBHOOK_URL?.trim();
+  if (!raw) return null;
+
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "https:") return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+async function notifyN8n(payload: LeadPayload) {
+  const url = n8nWebhookUrl();
+  if (!url) return;
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    throw new Error(`n8n webhook failed with status ${response.status}`);
+  }
+}
+
 async function callBitrix<T>(
   base: string,
   method: string,
@@ -220,6 +252,12 @@ export async function POST(request: Request) {
     utmContent: clean(raw.utmContent, 100),
     utmTerm: clean(raw.utmTerm, 100),
   };
+
+  try {
+    await notifyN8n(payload);
+  } catch (error) {
+    console.error("n8n lead notification failed", error);
+  }
 
   try {
     const [contact, userFields, category] = await Promise.all([
