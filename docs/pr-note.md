@@ -1,0 +1,1 @@
+This branch adds server-side n8n lead notifications for validated UIDOMHOME leads while keeping Bitrix24 as the primary CRM path. Configure `N8N_LEADS_WEBHOOK_URL` in the deployment environment before merging/deploying.
