@@ -3,7 +3,7 @@ import Script from "next/script";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://stroy-company.timka240306.chatgpt.site"),
+  metadataBase: new URL("https://uidomhome.kz"),
   title: { default: "UIDOMHOME", template: "%s — UIDOMHOME" },
   description:
     "Жилые комплексы UIDOMHOME, квартиры в наличии и реализованные проекты в Астане.",
